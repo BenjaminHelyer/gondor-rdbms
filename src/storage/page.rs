@@ -15,110 +15,129 @@ impl std::fmt::Display for PageError {
 
 impl std::error::Error for PageError {}
 
+/// size of the page header in bytes
+const HEADER_SIZE: usize = 16;
+
+/// size of a page in bytes
+const PAGE_SIZE: usize = 4096;
+
+/// Extracts and parses the page header from the raw page contents.
+///
+/// The header is stored in the first 16 bytes of the page and contains:
+/// - Page ID (4 bytes)
+/// - Free space (2 bytes)
+/// - Free begin offset (2 bytes)
+/// - Free end offset (2 bytes)
+/// - Reserved space (6 bytes)
+///
+/// # Returns
+///
+/// A `PageHeader` struct containing the parsed header information.
+///
+/// # Examples
+///
+/// ```
+/// use gondor_rdbms::storage::Page;
+/// 
+/// let page = Page::new(42);
+/// let header = page.get_header();
+/// assert_eq!(header.page_id, 42);
+/// ```
 #[derive(Debug, Clone)]
 pub struct PageHeader {
     pub page_id: u32,
-    pub tuple_count: u16,
-    pub free_space: u16,
+    pub free_space_total: u16,
+    pub offset_begin_free_space: u16,
+    pub offset_end_free_space: u16,
 }
 
 impl PageHeader {
     pub fn new(page_id: u32) -> Self {
         Self {
             page_id,
-            tuple_count: 0,
-            free_space: 4096, // 4KB default
+            free_space_total: (PAGE_SIZE - HEADER_SIZE) as u16,
+            offset_begin_free_space: HEADER_SIZE as u16,
+            offset_end_free_space: PAGE_SIZE as u16,
         }
     }
 }
 
+/// Represents a page in the database storage system.
+///
+/// A page is the fundamental unit of storage in the database, containing both
+/// a header section and the actual data. Each page has a fixed size of 4096 bytes.
+///
+/// The page layout is as follows:
+/// - Header (16 bytes)
+///   - Page ID (4 bytes)
+///   - Free space (2 bytes)
+///   - Free space begin offset (2 bytes)
+///   - Free space end offset (2 bytes)
+///   - Reserved space (6 bytes)
+/// - Data section (4080 bytes)
+///
+/// # Examples
+///
+/// ```
+/// use gondor_rdbms::storage::Page;
+///
+/// let page = Page::new(42);
+/// assert_eq!(page.get_header().page_id, 42);
+/// ```
 pub struct Page {
-    pub header: PageHeader,
-    pub slot_array: Vec<Option<usize>>, // Maps slot_id to index in data vector
-    pub data: Vec<Vec<u8>>, // Vector of tuples (each tuple is a Vec<u8>)
+    /// Raw contents of the page as a fixed-size byte array
+    contents: [u8; PAGE_SIZE],
 }
 
 impl Page {
     pub fn new(page_id: u32) -> Self {
-        Self {
-            header: PageHeader::new(page_id),
-            slot_array: Vec::new(),
-            data: Vec::new(),
+        let mut contents = [0u8; PAGE_SIZE];
+        let header = PageHeader::new(page_id);
+        
+        contents[0..4].copy_from_slice(&header.page_id.to_le_bytes());
+        contents[4..6].copy_from_slice(&header.free_space_total.to_le_bytes());
+        contents[6..8].copy_from_slice(&header.offset_begin_free_space.to_le_bytes());
+        contents[8..10].copy_from_slice(&header.offset_end_free_space.to_le_bytes());
+        
+        Self { contents }
+    }
+
+    pub fn get_header(&self) -> PageHeader {
+        let header_bytes = &self.contents[0..HEADER_SIZE];
+        let page_id = u32::from_le_bytes([header_bytes[0], header_bytes[1], header_bytes[2], header_bytes[3]]);
+        let free_space_total = u16::from_le_bytes([header_bytes[4], header_bytes[5]]);
+        let offset_begin_free_space = u16::from_le_bytes([header_bytes[6], header_bytes[7]]);
+        let offset_end_free_space = u16::from_le_bytes([header_bytes[8], header_bytes[9]]);
+
+        PageHeader {
+            page_id,
+            free_space_total,
+            offset_begin_free_space,
+            offset_end_free_space,
         }
-    }
-    
-    /// Create a new tuple and return its slot ID
-    pub fn create_tuple(&mut self, tuple_data: Vec<u8>) -> usize {
-        let data_index = self.data.len();
-        self.data.push(tuple_data);
 
-        let slot_id = self.slot_array.len();
-        self.slot_array.push(Some(data_index));
-
-        self.header.tuple_count += 1;
-        slot_id
     }
 
-    /// Read a tuple by slot ID
-    pub fn read_tuple(&self, slot_id: usize) -> Result<&Vec<u8>, PageError> {
-        if slot_id >= self.slot_array.len() {
+    pub fn get_data(&self, slot_id: u16) -> Result<&[u8], PageError> {
+        let header = self.get_header();
+        let slot_offset = HEADER_SIZE as u16 + slot_id * 2;
+
+        if slot_offset >= header.offset_begin_free_space {
             return Err(PageError::InvalidSlot);
         }
 
-        match self.slot_array[slot_id] {
-            Some(data_index) => {
-                if data_index < self.data.len() {
-                    Ok(&self.data[data_index])
-                } else {
-                    Err(PageError::TupleNotFound)
-                }
-            },
-            None => Err(PageError::TupleNotFound),
-        }
-    }
+        let slot_data = &self.contents[slot_offset as usize..(slot_offset + 4) as usize];
+        let tuple_offset = u16::from_le_bytes([slot_data[0], slot_data[1]]);
+        let tuple_length = u16::from_le_bytes([slot_data[2], slot_data[3]]);
 
-    /// Update a tuple by slot ID
-    pub fn update_tuple(&mut self, slot_id: usize, new_data: Vec<u8>) -> Result<(), PageError> {
-        if slot_id >= self.slot_array.len() {
-            return Err(PageError::InvalidSlot);
+        if tuple_offset + tuple_length > PAGE_SIZE as u16 {
+            return Err(PageError::TupleNotFound);
         }
-
-        match self.slot_array[slot_id] {
-            Some(data_index) => {
-                if data_index < self.data.len() {
-                    self.data[data_index] = new_data;
-                    Ok(())
-                } else {
-                    Err(PageError::TupleNotFound)
-                }
-            }
-            None => Err(PageError::TupleNotFound),
-        }
-    }
-
-    /// Delete a tuple by slot ID (marks slot as empty)
-    pub fn delete_tuple(&mut self, slot_id: usize) -> Result<(), PageError> {
-        if slot_id >= self.slot_array.len() {
-            return Err(PageError::InvalidSlot);
-        }
-
-        if self.slot_array[slot_id].is_none() {
+        else if tuple_offset + tuple_length < header.offset_begin_free_space {
             return Err(PageError::TupleNotFound);
         }
 
-        self.slot_array[slot_id] = None;
-        self.header.tuple_count -= 1;
-        Ok(())
-    }
-
-    /// Get the number of active tuples
-    pub fn tuple_count(&self) -> u16 {
-        self.header.tuple_count
-    }
-
-    /// Check if a slot is valid and contains data
-    pub fn is_slot_valid(&self, slot_id: usize) -> bool {
-        slot_id < self.slot_array.len() && self.slot_array[slot_id].is_some()
+        Ok(&self.contents[tuple_offset as usize..(tuple_offset + tuple_length) as usize])
     }
 }
 
@@ -129,138 +148,9 @@ mod tests {
     #[test]
     fn test_page_creation() {
         let page = Page::new(1);
-        assert_eq!(page.header.page_id, 1);
-        assert_eq!(page.header.tuple_count, 0);
-        assert_eq!(page.slot_array.len(), 0);
-        assert_eq!(page.data.len(), 0);
-    }
-
-    #[test]
-    fn test_create_tuple() {
-        let mut page = Page::new(1);
-        let tuple_data = vec![1, 2, 3, 4];
-        
-        let slot_id = page.create_tuple(tuple_data.clone());
-        
-        assert_eq!(slot_id, 0);
-        assert_eq!(page.tuple_count(), 1);
-        assert_eq!(page.data.len(), 1);
-        assert_eq!(page.slot_array.len(), 1);
-        assert_eq!(page.slot_array[0], Some(0));
-    }
-
-    #[test]
-    fn test_read_tuple() {
-        let mut page = Page::new(1);
-        let tuple_data = vec![1, 2, 3, 4];
-        
-        let slot_id = page.create_tuple(tuple_data.clone());
-        let read_data = page.read_tuple(slot_id).unwrap();
-        
-        assert_eq!(read_data, &tuple_data);
-    }
-
-    #[test]
-    fn test_update_tuple() {
-        let mut page = Page::new(1);
-        let original_data = vec![1, 2, 3, 4];
-        let updated_data = vec![5, 6, 7, 8];
-        
-        let slot_id = page.create_tuple(original_data);
-        page.update_tuple(slot_id, updated_data.clone()).unwrap();
-        
-        let read_data = page.read_tuple(slot_id).unwrap();
-        assert_eq!(read_data, &updated_data);
-    }
-
-    #[test]
-    fn test_delete_tuple() {
-        let mut page = Page::new(1);
-        let tuple_data = vec![1, 2, 3, 4];
-        
-        let slot_id = page.create_tuple(tuple_data);
-        assert_eq!(page.tuple_count(), 1);
-        
-        page.delete_tuple(slot_id).unwrap();
-        assert_eq!(page.tuple_count(), 0);
-        assert!(!page.is_slot_valid(slot_id));
-        
-        let result = page.read_tuple(slot_id);
-        assert_eq!(result, Err(PageError::TupleNotFound));
-    }
-
-    #[test]
-    fn test_multiple_tuples() {
-        let mut page = Page::new(1);
-        
-        let tuple1 = vec![1, 2];
-        let tuple2 = vec![3, 4];
-        let tuple3 = vec![5, 6];
-        
-        let slot1 = page.create_tuple(tuple1.clone());
-        let slot2 = page.create_tuple(tuple2.clone());
-        let slot3 = page.create_tuple(tuple3.clone());
-        
-        assert_eq!(slot1, 0);
-        assert_eq!(slot2, 1);
-        assert_eq!(slot3, 2);
-        assert_eq!(page.tuple_count(), 3);
-        
-        assert_eq!(page.read_tuple(slot1).unwrap(), &tuple1);
-        assert_eq!(page.read_tuple(slot2).unwrap(), &tuple2);
-        assert_eq!(page.read_tuple(slot3).unwrap(), &tuple3);
-    }
-
-    #[test]
-    fn test_invalid_slot_errors() {
-        let page = Page::new(1);
-        
-        // Test reading from non-existent slot
-        let result = page.read_tuple(0);
-        assert_eq!(result, Err(PageError::InvalidSlot));
-        
-        // Test reading from out-of-bounds slot
-        let result = page.read_tuple(100);
-        assert_eq!(result, Err(PageError::InvalidSlot));
-    }
-
-    #[test]
-    fn test_tuple_not_found_errors() {
-        let mut page = Page::new(1);
-        let tuple_data = vec![1, 2, 3];
-        
-        let slot_id = page.create_tuple(tuple_data);
-        page.delete_tuple(slot_id).unwrap();
-        
-        // Try to read deleted tuple
-        let result = page.read_tuple(slot_id);
-        assert_eq!(result, Err(PageError::TupleNotFound));
-        
-        // Try to update deleted tuple
-        let result = page.update_tuple(slot_id, vec![4, 5, 6]);
-        assert_eq!(result, Err(PageError::TupleNotFound));
-        
-        // Try to delete already deleted tuple
-        let result = page.delete_tuple(slot_id);
-        assert_eq!(result, Err(PageError::TupleNotFound));
-    }
-
-    #[test]
-    fn test_is_slot_valid() {
-        let mut page = Page::new(1);
-        let tuple_data = vec![1, 2, 3];
-        
-        // Invalid slot (doesn't exist)
-        assert!(!page.is_slot_valid(0));
-        
-        let slot_id = page.create_tuple(tuple_data);
-        
-        // Valid slot
-        assert!(page.is_slot_valid(slot_id));
-        
-        page.delete_tuple(slot_id).unwrap();
-        
-        // Invalid slot (deleted)
-        assert!(!page.is_slot_valid(slot_id));
+        assert_eq!(page.get_header().page_id, 1);
+        assert_eq!(page.get_header().free_space_total, (PAGE_SIZE - HEADER_SIZE) as u16);
+        assert_eq!(page.get_header().offset_begin_free_space, HEADER_SIZE as u16);
+        assert_eq!(page.get_header().offset_end_free_space, PAGE_SIZE as u16);
     }
 }
