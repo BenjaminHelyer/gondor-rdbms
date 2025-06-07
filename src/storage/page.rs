@@ -2,6 +2,7 @@
 pub enum PageError {
     TupleNotFound,
     InvalidSlot,
+    NotEnoughSpace,
 }
 
 impl std::fmt::Display for PageError {
@@ -9,6 +10,7 @@ impl std::fmt::Display for PageError {
         match self {
             PageError::TupleNotFound => write!(f, "Tuple not found"),
             PageError::InvalidSlot => write!(f, "Invalid slot"),
+            PageError::NotEnoughSpace => write!(f, "Not enough space"),
         }
     }
 }
@@ -139,6 +141,51 @@ impl Page {
 
         Ok(&self.contents[tuple_offset as usize..(tuple_offset + tuple_length) as usize])
     }
+
+    pub fn insert_tuple(&mut self, tuple: &[u8]) -> Result<u16, PageError> {
+        let header = self.get_header();
+
+        if header.free_space_total < tuple.len() as u16 {
+            return Err(PageError::NotEnoughSpace);
+        }
+
+        // data and slot array grow towards each other, so slot array ends where free space begins
+        let slot_offset = header.offset_begin_free_space;
+        let slot_id = (slot_offset - HEADER_SIZE as u16) / 2;
+
+        // data and slot array grow towards each other, so data array begins where free space ends
+        let tuple_offset_end = header.offset_end_free_space;
+        let tuple_offset_begin = tuple_offset_end - tuple.len() as u16; // end of tuple should be where free space ends
+        
+        // modify slot array to point to the new tuple
+        let slot_data = &mut self.contents[slot_offset as usize..(slot_offset + 4) as usize];
+        slot_data[0] = (tuple_offset_begin & 0xFF) as u8; // get lower 8 bits -- mask upper 8 bits of offset
+        slot_data[1] = ((tuple_offset_begin >> 8) & 0xFF) as u8; // get upper 8 bits -- shift and mask upper 8 bits of offset (should be 0, but just in case)
+        slot_data[2] = (tuple.len() & 0xFF) as u8; // get lower 8 bits --mask upper 8 bits of length
+        slot_data[3] = ((tuple.len() >> 8) & 0xFF) as u8; // get upper 8 bits --shift and mask upper 8 bits of length (should be 0, but just in case)
+
+        // copy tuple into the appropraite slot on page
+        let tuple_data = &mut self.contents[tuple_offset_begin as usize..tuple_offset_end as usize];
+        tuple_data.copy_from_slice(tuple);
+
+        // calculate new free space
+        let new_free_space_total = header.free_space_total - tuple.len() as u16;
+        let new_offset_begin_free_space = slot_offset + 4;
+        let new_offset_end_free_space = tuple_offset_begin - 1;
+
+        // update header with new free space
+        let header_bytes = &mut self.contents[0..HEADER_SIZE];
+        // leave first 4 bytes of header unchanged -- these bytes are the page id
+        header_bytes[4] = (new_free_space_total & 0xFF) as u8; // get lower 8 bits
+        header_bytes[5] = ((new_free_space_total >> 8) & 0xFF) as u8; // get upper 8 bits
+        header_bytes[6] = (new_offset_begin_free_space & 0xFF) as u8; // get lower 8 bits
+        header_bytes[7] = ((new_offset_begin_free_space >> 8) & 0xFF) as u8; // get upper 8 bits
+        header_bytes[8] = (new_offset_end_free_space & 0xFF) as u8; // get lower 8 bits
+        header_bytes[9] = ((new_offset_end_free_space >> 8) & 0xFF) as u8; // get upper 8 bits
+
+        // return slot id of the new tuple
+        Ok(slot_id)
+    }
 }
 
 #[cfg(test)]
@@ -152,5 +199,54 @@ mod tests {
         assert_eq!(page.get_header().free_space_total, (PAGE_SIZE - HEADER_SIZE) as u16);
         assert_eq!(page.get_header().offset_begin_free_space, HEADER_SIZE as u16);
         assert_eq!(page.get_header().offset_end_free_space, PAGE_SIZE as u16);
+    }
+
+    #[test]
+    fn test_insert_tuple() {
+        let mut page = Page::new(1);
+        let tuple = b"Hello, world!";
+        let slot_id = page.insert_tuple(tuple).unwrap();
+        assert_eq!(slot_id, 0);
+        let retrieved_tuple = page.get_data(slot_id).unwrap();
+        assert_eq!(retrieved_tuple, tuple);
+    }
+
+    #[test]
+    fn test_insert_tuple_not_enough_space() {
+        let mut page = Page::new(1);
+        // make page header show that there is no space left
+        let header = page.get_header();
+        let header_bytes = &mut page.contents[0..HEADER_SIZE];
+
+        header_bytes[4] = 0; // no free space total
+        header_bytes[5] = 0;
+        header_bytes[6] = 0; // free space begin offset is index 0
+        header_bytes[7] = 0;
+        header_bytes[8] = 0; // free space end offset is index 0
+        header_bytes[9] = 0;
+
+        let tuple = b"Hello, world! This tuple is too long to fit in the page.";
+        let result = page.insert_tuple(tuple);
+        assert_eq!(result.unwrap_err(), PageError::NotEnoughSpace);
+    }
+
+    #[test]
+    fn test_insert_multiple_tuples() {
+        let mut page = Page::new(1);
+        let tuple1 = b"Hello, world!";
+        let tuple2 = b"This is a test tuple.";
+        let tuple3 = b"Another test tuple.";
+
+        let slot_id1 = page.insert_tuple(tuple1).unwrap();
+        let slot_id2 = page.insert_tuple(tuple2).unwrap();
+        let slot_id3 = page.insert_tuple(tuple3).unwrap();
+
+        let data1 = page.get_data(slot_id1).unwrap();
+        let data2 = page.get_data(slot_id2).unwrap();
+        let data3 = page.get_data(slot_id3).unwrap();
+
+        assert_eq!(data1, tuple1);
+        assert_eq!(data2, tuple2);
+        assert_eq!(data3, tuple3);
     }
 }
