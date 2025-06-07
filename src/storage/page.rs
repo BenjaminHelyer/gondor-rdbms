@@ -357,76 +357,85 @@ mod tests {
     #[test]
     fn test_free_space_calculation() {
         let mut page = Page::new(1);
+        let initial_header = page.get_header();
+        let initial_free_space = initial_header.free_space_total;
         
-        // Test that free space calculation works correctly
-        let tuple_data = b"TestData12"; // 10 bytes
-        let mut slot_ids = Vec::new();
+        // Test 1: Insert a 10-byte tuple
+        let tuple_data_10: [u8; 10] = [0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08, 0x09, 0x0A];
+        let expected_decrease_10 = tuple_data_10.len() + 4; // 10 bytes data + 4 bytes slot = 14 bytes
         
-        // Insert tuples one by one and track free space
-        for i in 0..10 {
-            let header_before = page.get_header();
-            println!("Before inserting tuple {}: free_space = {}, begin_offset = {}, end_offset = {}", 
-                     i, header_before.free_space_total, header_before.offset_begin_free_space, header_before.offset_end_free_space);
-            
-            match page.insert_tuple(tuple_data) {
-                Ok(slot_id) => {
-                    slot_ids.push(slot_id);
-                    let header_after = page.get_header();
-                    println!("After inserting tuple {}: free_space = {}, begin_offset = {}, end_offset = {}", 
-                             i, header_after.free_space_total, header_after.offset_begin_free_space, header_after.offset_end_free_space);
-                    
-                    // Verify the free space decreased by the expected amount
-                    let expected_decrease = tuple_data.len() + 4; // data + slot array entry
-                    let actual_decrease = header_before.free_space_total - header_after.free_space_total;
-                    println!("Expected decrease: {}, Actual decrease: {}", expected_decrease, actual_decrease);
-                    
-                    if actual_decrease != expected_decrease as u16 {
-                        println!("WARNING: Free space decrease doesn't match expected!");
-                    }
-                }
-                Err(e) => {
-                    println!("Failed to insert tuple {} due to: {:?}", i, e);
-                    println!("But we still have {} bytes of free space!", header_before.free_space_total);
-                    
-                    // If we have more than enough space for this tuple, this is a bug
-                    if header_before.free_space_total > 20 {
-                        panic!("BUG: Failed to insert tuple despite having {} bytes free space", header_before.free_space_total);
-                    }
-                    break;
-                }
-            }
-            println!("---");
-        }
+        let slot_id_1 = page.insert_tuple(&tuple_data_10).expect("Should insert 10-byte tuple");
+        let header_after_1 = page.get_header();
+        let actual_decrease_1 = initial_free_space - header_after_1.free_space_total;
+        
+        assert_eq!(actual_decrease_1, expected_decrease_10 as u16,
+                   "Free space should decrease by exactly {} bytes for 10-byte tuple", expected_decrease_10);
+        
+        // Test 2: Insert a 20-byte tuple  
+        let tuple_data_20: [u8; 20] = [
+            0x11, 0x12, 0x13, 0x14, 0x15, 0x16, 0x17, 0x18, 0x19, 0x1A,
+            0x1B, 0x1C, 0x1D, 0x1E, 0x1F, 0x20, 0x21, 0x22, 0x23, 0x24
+        ];
+        let expected_decrease_20 = tuple_data_20.len() + 4; // 20 bytes data + 4 bytes slot = 24 bytes
+        
+        let free_space_before_2 = header_after_1.free_space_total;
+        let slot_id_2 = page.insert_tuple(&tuple_data_20).expect("Should insert 20-byte tuple");
+        let header_after_2 = page.get_header();
+        let actual_decrease_2 = free_space_before_2 - header_after_2.free_space_total;
+        
+        assert_eq!(actual_decrease_2, expected_decrease_20 as u16,
+                   "Free space should decrease by exactly {} bytes for 20-byte tuple", expected_decrease_20);
+        
+        // Verify we can retrieve both tuples correctly
+        let retrieved_1 = page.get_data(slot_id_1).expect("Should retrieve first tuple");
+        let retrieved_2 = page.get_data(slot_id_2).expect("Should retrieve second tuple");
+        
+        assert_eq!(retrieved_1, &tuple_data_10, "First tuple should match inserted data");
+        assert_eq!(retrieved_2, &tuple_data_20, "Second tuple should match inserted data");
     }
 
     #[test]
     fn test_update_tuple_not_enough_space() {
         let mut page = Page::new(1);
         
-        // Insert tuples to fill up most of the page
-        let tuple_data = b"TestData12"; // 10 bytes
+        // Use a deterministic u8 array of known length
+        let tuple_data: [u8; 10] = [0x41, 0x42, 0x43, 0x44, 0x45, 0x46, 0x47, 0x48, 0x49, 0x4A]; // 10 bytes
+        let tuple_size = tuple_data.len(); // 10 bytes
+        let slot_size = 4; // 4 bytes per slot array entry
+        
+        // Calculate how many tuples we can fit mathematically
+        // Available space = PAGE_SIZE - HEADER_SIZE = 4096 - 16 = 4080 bytes
+        // Each tuple uses: tuple_size + slot_size = 10 + 4 = 14 bytes
+        let available_space = PAGE_SIZE - HEADER_SIZE; // 4080 bytes
+        let space_per_tuple = tuple_size + slot_size; // 14 bytes
+        let max_tuples = available_space / space_per_tuple; // 4080 / 14 = 291 tuples
+        
+        // Insert exactly max_tuples - 1 to leave some space for testing update failure
+        let tuples_to_insert = max_tuples - 1; // 290 tuples
         let mut slot_ids = Vec::new();
         
-        // Keep inserting until we can't fit another tuple
-        loop {
-            match page.insert_tuple(tuple_data) {
-                Ok(slot_id) => {
-                    slot_ids.push(slot_id);
-                }
-                Err(PageError::NotEnoughSpace) => break,
-                Err(_) => panic!("Unexpected error"),
-            }
+        for i in 0..tuples_to_insert {
+            let slot_id = page.insert_tuple(&tuple_data)
+                .expect(&format!("Should be able to insert tuple {}", i));
+            slot_ids.push(slot_id);
         }
         
-        // Ensure we have at least one tuple to update
-        assert!(!slot_ids.is_empty(), "Should have inserted at least one tuple");
-        
+        // Verify our calculation: check remaining free space
         let header = page.get_header();
-        println!("Free space after filling: {}", header.free_space_total);
+        let expected_remaining_space = available_space - (tuples_to_insert * space_per_tuple);
+        println!("Expected remaining space: {}", expected_remaining_space);
+        println!("Actual remaining space: {}", header.free_space_total);
         println!("Number of tuples inserted: {}", slot_ids.len());
         
-        // Now try to update one of the tuples to be much longer than the available free space
-        let longer_tuple = vec![b'X'; header.free_space_total as usize + 100];
+        // Verify our mathematical calculation matches reality
+        assert_eq!(header.free_space_total, expected_remaining_space as u16,
+                   "Free space calculation should match mathematical prediction");
+        
+        // Now try to update one tuple to be larger than the remaining space
+        // Use exactly remaining_space + 1 to guarantee failure
+        let larger_size = header.free_space_total as usize + 1;
+        let longer_tuple = vec![0xFF; larger_size];
+        
         let result = page.update_tuple(slot_ids[0], &longer_tuple);
         
         // This should fail with NotEnoughSpace
