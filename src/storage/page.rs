@@ -129,15 +129,8 @@ impl Page {
 
     pub fn get_data(&self, slot_id: u16) -> Result<&[u8], PageError> {
         let header = self.get_header();
-        let slot_offset = HEADER_SIZE as u16 + slot_id * 2;
-
-        if slot_offset >= header.offset_begin_free_space {
-            return Err(PageError::InvalidSlot);
-        }
-
-        let slot_data = &self.contents[slot_offset as usize..(slot_offset + 4) as usize];
-        let tuple_offset = u16::from_le_bytes([slot_data[0], slot_data[1]]);
-        let tuple_length = u16::from_le_bytes([slot_data[2], slot_data[3]]);
+        
+        let (tuple_offset, tuple_length) = self.get_tuple_offset_and_length(slot_id)?;
 
         if tuple_offset + tuple_length > PAGE_SIZE as u16 {
             return Err(PageError::TupleNotFound);
@@ -182,6 +175,12 @@ impl Page {
         Ok(slot_id)
     }
 
+    pub fn update_tuple(&mut self, slot_id: u16, tuple: &[u8]) -> Result<u16, PageError> {
+        let (tuple_offset, tuple_length) = self.get_tuple_offset_and_length(slot_id)?;
+
+        Ok(slot_id)
+    }
+
     fn update_slot(&mut self, slot_id: u16, tuple_offset_begin: u16, tuple_length: u16) -> Result<(), PageError> {
         let slot_offset = HEADER_SIZE as u16 + slot_id * 2;
 
@@ -218,6 +217,20 @@ impl Page {
         header_bytes[9] = ((new_offset_end_free_space >> 8) & 0xFF) as u8; // get upper 8 bits
 
         Ok(())
+    }
+
+    fn get_tuple_offset_and_length(&self, slot_id: u16) -> Result<(u16, u16), PageError> {
+        let slot_offset = HEADER_SIZE as u16 + slot_id * 2;
+
+        if slot_offset + 4 > PAGE_SIZE as u16 {
+            return Err(PageError::InvalidSlot);
+        }
+
+        let slot_data = &self.contents[slot_offset as usize..(slot_offset + 4) as usize];
+        let tuple_offset = u16::from_le_bytes([slot_data[0], slot_data[1]]);
+        let tuple_length = u16::from_le_bytes([slot_data[2], slot_data[3]]);
+
+        Ok((tuple_offset, tuple_length))
     }
 }
 
