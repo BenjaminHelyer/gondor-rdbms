@@ -53,6 +53,13 @@ pub struct PageHeader {
     pub offset_end_free_space: u16,
 }
 
+/// Represents the header of a page in the database storage system.
+///
+/// The header is stored in the first 16 bytes of the page and contains:
+/// - Page ID (4 bytes)
+/// - Free space (2 bytes)
+/// - Free space begin offset (2 bytes)
+/// - Free space end offset (2 bytes)
 impl PageHeader {
     pub fn new(page_id: u32) -> Self {
         Self {
