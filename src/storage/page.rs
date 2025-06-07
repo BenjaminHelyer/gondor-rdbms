@@ -158,11 +158,7 @@ impl Page {
         let tuple_offset_begin = tuple_offset_end - tuple.len() as u16; // end of tuple should be where free space ends
         
         // modify slot array to point to the new tuple
-        let slot_data = &mut self.contents[slot_offset as usize..(slot_offset + 4) as usize];
-        slot_data[0] = (tuple_offset_begin & 0xFF) as u8; // get lower 8 bits -- mask upper 8 bits of offset
-        slot_data[1] = ((tuple_offset_begin >> 8) & 0xFF) as u8; // get upper 8 bits -- shift and mask upper 8 bits of offset (should be 0, but just in case)
-        slot_data[2] = (tuple.len() & 0xFF) as u8; // get lower 8 bits --mask upper 8 bits of length
-        slot_data[3] = ((tuple.len() >> 8) & 0xFF) as u8; // get upper 8 bits --shift and mask upper 8 bits of length (should be 0, but just in case)
+        self.update_slot(slot_id, tuple_offset_begin, tuple.len() as u16)?;
 
         // copy tuple into the appropraite slot on page
         let tuple_data = &mut self.contents[tuple_offset_begin as usize..tuple_offset_end as usize];
@@ -173,9 +169,40 @@ impl Page {
         let new_offset_begin_free_space = slot_offset + 4;
         let new_offset_end_free_space = tuple_offset_begin - 1;
 
-        // update header with new free space
+        self.update_header(new_free_space_total, new_offset_begin_free_space, new_offset_end_free_space);
+
+        // return slot id of the new tuple
+        Ok(slot_id)
+    }
+
+    fn update_slot(&mut self, slot_id: u16, tuple_offset_begin: u16, tuple_length: u16) -> Result<(), PageError> {
+        let slot_offset = HEADER_SIZE as u16 + slot_id * 2;
+
+        if slot_offset + 4 > PAGE_SIZE as u16 {
+            return Err(PageError::InvalidSlot);
+        } else if slot_offset + 4 > self.get_header().offset_end_free_space {
+            // this case would mean we are trying to modify slot array data that is in the data space
+            // typically this means we do not have enough space
+            return Err(PageError::NotEnoughSpace);
+        }
+
+        // update slot array data
+        let slot_data = &mut self.contents[slot_offset as usize..(slot_offset + 4) as usize];
+        slot_data[0] = (tuple_offset_begin & 0xFF) as u8; // get lower 8 bits -- mask upper 8 bits of offset
+        slot_data[1] = ((tuple_offset_begin >> 8) & 0xFF) as u8; // get upper 8 bits -- shift and mask upper 8 bits of offset (should be 0, but just in case)
+        slot_data[2] = (tuple_length & 0xFF) as u8; // get lower 8 bits -- mask upper 8 bits of length
+        slot_data[3] = ((tuple_length >> 8) & 0xFF) as u8; // get upper 8 bits -- shift and mask upper 8 bits of length (should be 0, but just in case)
+
+        // update header with new free space beginning, since slot array is now extended
+        let header = self.get_header();
+        let new_offset_begin_free_space = slot_offset + 4;
+        self.update_header(header.free_space_total, new_offset_begin_free_space, header.offset_end_free_space);
+
+        Ok(())
+    }
+
+    fn update_header(&mut self, new_free_space_total: u16, new_offset_begin_free_space: u16, new_offset_end_free_space: u16) -> Result<(), PageError> {
         let header_bytes = &mut self.contents[0..HEADER_SIZE];
-        // leave first 4 bytes of header unchanged -- these bytes are the page id
         header_bytes[4] = (new_free_space_total & 0xFF) as u8; // get lower 8 bits
         header_bytes[5] = ((new_free_space_total >> 8) & 0xFF) as u8; // get upper 8 bits
         header_bytes[6] = (new_offset_begin_free_space & 0xFF) as u8; // get lower 8 bits
@@ -183,8 +210,7 @@ impl Page {
         header_bytes[8] = (new_offset_end_free_space & 0xFF) as u8; // get lower 8 bits
         header_bytes[9] = ((new_offset_end_free_space >> 8) & 0xFF) as u8; // get upper 8 bits
 
-        // return slot id of the new tuple
-        Ok(slot_id)
+        Ok(())
     }
 }
 
