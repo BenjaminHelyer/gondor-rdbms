@@ -135,7 +135,10 @@ impl Page {
         if tuple_offset + tuple_length > PAGE_SIZE as u16 {
             return Err(PageError::TupleNotFound);
         }
-        else if tuple_offset + tuple_length < header.offset_begin_free_space {
+        else if tuple_offset < header.offset_begin_free_space {
+            // this means the tuple is in the slot array or header space
+            // this ultimately means the tuple isn't there -- it could have been deleted (slot array points to header)
+            // or it may have never existed at all
             return Err(PageError::TupleNotFound);
         }
 
@@ -182,7 +185,12 @@ impl Page {
 
         let (old_tuple_offset, old_tuple_length) = self.get_tuple_offset_and_length(slot_id)?;
 
-        if tuple.len() as u16 > old_tuple_length {
+        if old_tuple_offset < header.offset_begin_free_space {
+            // this means the tuple is in the slot array or header space
+            // this ultimately means the tuple isn't there -- it could have been deleted (slot array points to header)
+            // or it may have never existed at all
+            return Err(PageError::TupleNotFound);
+        } else if tuple.len() as u16 > old_tuple_length {
             // this is OK so long as we still have enough space
             if tuple.len() as u16 > header.free_space_total {
                 return Err(PageError::NotEnoughSpace);
@@ -210,6 +218,16 @@ impl Page {
         self.update_header(new_free_space_total, new_offset_begin_free_space, new_offset_end_free_space);
 
         Ok(slot_id)
+    }
+
+    pub fn delete_tuple(&mut self, slot_id: u16) -> Result<(), PageError> {
+        let header = self.get_header();
+        
+        // simply modify slot array to indicate the tuple is deleted
+        // we deal with this later upon page compaction
+        self.update_slot(slot_id, 0, 0)?; // zero means deleted, since that points to header
+
+        Ok(())
     }
 
     fn update_slot(&mut self, slot_id: u16, tuple_offset_begin: u16, tuple_length: u16) -> Result<(), PageError> {
@@ -440,6 +458,18 @@ mod tests {
         
         // This should fail with NotEnoughSpace
         assert_eq!(result.unwrap_err(), PageError::NotEnoughSpace);
+    }
+
+    #[test]
+    fn test_delete_tuple() {
+        let mut page = Page::new(1);
+        let tuple = b"Hello, world!";
+        let slot_id = page.insert_tuple(tuple).unwrap();
+        page.delete_tuple(slot_id).unwrap();
+        let result = page.update_tuple(slot_id, tuple);
+        assert_eq!(result.unwrap_err(), PageError::TupleNotFound);
+        let result = page.get_data(slot_id);
+        assert_eq!(result.unwrap_err(), PageError::TupleNotFound);
     }
 
 }
