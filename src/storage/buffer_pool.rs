@@ -2,6 +2,7 @@ use super::Page;
 use std::collections::HashMap;
 use std::fs::File;
 use std::io::Read;
+use std::io::Write;
 
 #[derive(Debug)]
 pub enum BufferPoolError {
@@ -41,6 +42,14 @@ impl BufferPool {
         Ok(self.pages.get(&page_id).unwrap())
     }
 
+    pub fn write_page_to_disk(&mut self, page_id: u32) -> Result<(), BufferPoolError> {
+        let page = self.pages.get(&page_id).ok_or(BufferPoolError::PageNotFound)?;
+        let page_path = self.page_paths.get(&page_id).ok_or(BufferPoolError::PageNotFound)?;
+        let mut file = File::create(page_path)?;
+        file.write_all(page.get_raw_contents())?;
+        Ok(())
+    }
+
     pub fn add_page_path(&mut self, page_id: u32, path: String) {
         self.page_paths.insert(page_id, path);
     }
@@ -50,7 +59,6 @@ impl BufferPool {
 mod tests {
     use super::*;
     use tempfile::NamedTempFile;
-    use std::io::Write;
 
     #[test]
     fn test_read_page_from_disk() {
@@ -79,5 +87,28 @@ mod tests {
         assert_eq!(header.free_space_total, 4080); // PAGE_SIZE - HEADER_SIZE = 4096 - 16
         assert_eq!(header.offset_begin_free_space, 16); // HEADER_SIZE
         assert_eq!(header.offset_end_free_space, 4096); // PAGE_SIZE
+    }
+
+    #[test]
+    fn test_write_page_to_disk() {
+        // Create a valid page in memory with page_id = 42
+        let page_id = 42u32;
+        let page = Page::new(page_id);
+
+        let mut buffer_pool = BufferPool::new();
+        buffer_pool.add_page_path(page_id, "test_page.bin".to_string());
+        buffer_pool.pages.insert(page_id, page);
+
+        buffer_pool.write_page_to_disk(page_id);
+
+        let read_page = buffer_pool.read_page_from_disk(page_id);
+        let header = read_page.unwrap().get_header();
+        assert_eq!(header.page_id, page_id);
+        assert_eq!(header.free_space_total, 4080); // PAGE_SIZE - HEADER_SIZE = 4096 - 16
+        assert_eq!(header.offset_begin_free_space, 16); // HEADER_SIZE
+        assert_eq!(header.offset_end_free_space, 4096); // PAGE_SIZE
+
+        // remove test_page.bin
+        std::fs::remove_file("test_page.bin").expect("Failed to remove test_page.bin");
     }
 }
