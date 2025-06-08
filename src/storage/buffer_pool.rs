@@ -99,9 +99,9 @@ mod tests {
         buffer_pool.add_page_path(page_id, "test_page.bin".to_string());
         buffer_pool.pages.insert(page_id, page);
 
-        buffer_pool.write_page_to_disk(page_id);
+        buffer_pool.write_page_to_disk(page_id).expect("Failed to write page to disk");
 
-        let read_page = buffer_pool.read_page_from_disk(page_id);
+        let read_page = buffer_pool.read_page_from_disk(page_id).expect("Failed to read page from disk");
         let header = read_page.unwrap().get_header();
         assert_eq!(header.page_id, page_id);
         assert_eq!(header.free_space_total, 4080); // PAGE_SIZE - HEADER_SIZE = 4096 - 16
