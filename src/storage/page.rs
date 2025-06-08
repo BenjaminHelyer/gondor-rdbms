@@ -3,6 +3,7 @@ pub enum PageError {
     TupleNotFound,
     InvalidSlot,
     NotEnoughSpace,
+    InvalidPageContents,
 }
 
 impl std::fmt::Display for PageError {
@@ -11,6 +12,7 @@ impl std::fmt::Display for PageError {
             PageError::TupleNotFound => write!(f, "Tuple not found"),
             PageError::InvalidSlot => write!(f, "Invalid slot"),
             PageError::NotEnoughSpace => write!(f, "Not enough space"),
+            PageError::InvalidPageContents => write!(f, "Invalid page contents"),
         }
     }
 }
@@ -230,6 +232,54 @@ impl Page {
         Ok(())
     }
 
+    pub fn set_contents(&mut self, contents: &[u8]) -> Result<(), PageError> {
+        if contents.len() != PAGE_SIZE {
+            return Err(PageError::InvalidPageContents);
+        }
+
+        self.contents.copy_from_slice(contents);
+
+        // try to parse the header
+        let header = self.parse_header_from_contents()?;
+        
+        Ok(())
+    }
+
+    pub fn get_raw_contents(&self) -> &[u8] {
+        &self.contents
+    }
+
+    fn parse_header_from_contents(&self) -> Result<PageHeader, PageError> {
+        let header_bytes = &self.contents[0..HEADER_SIZE];
+        let page_id = u32::from_le_bytes([header_bytes[0], header_bytes[1], header_bytes[2], header_bytes[3]]);
+        let free_space_total = u16::from_le_bytes([header_bytes[4], header_bytes[5]]);
+        let offset_begin_free_space = u16::from_le_bytes([header_bytes[6], header_bytes[7]]);
+        let offset_end_free_space = u16::from_le_bytes([header_bytes[8], header_bytes[9]]);
+
+        if free_space_total > PAGE_SIZE as u16 - HEADER_SIZE as u16 {
+            return Err(PageError::InvalidPageContents);
+        }
+
+        if offset_begin_free_space > PAGE_SIZE as u16 {
+            return Err(PageError::InvalidPageContents);
+        }
+
+        if offset_end_free_space > PAGE_SIZE as u16 {
+            return Err(PageError::InvalidPageContents);
+        }
+
+        if offset_begin_free_space > offset_end_free_space {
+            return Err(PageError::InvalidPageContents);
+        }
+
+        Ok(PageHeader {
+            page_id,
+            free_space_total,
+            offset_begin_free_space,
+            offset_end_free_space,
+        })
+    }
+
     fn update_slot(&mut self, slot_id: u16, tuple_offset_begin: u16, tuple_length: u16) -> Result<(), PageError> {
         // This version updates both slot data and header (for use in update_tuple)
         self.update_slot_data_only(slot_id, tuple_offset_begin, tuple_length)?;
@@ -297,6 +347,8 @@ impl Page {
 
         Ok(())
     }
+
+    
 }
 
 #[cfg(test)]
