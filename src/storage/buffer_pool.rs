@@ -1,9 +1,9 @@
-use gondor_rdbms::storage::Page;
+use super::Page;
 use std::collections::HashMap;
 use std::fs::File;
-use std::io::{Read, Write};
+use std::io::Read;
 
-#[derive(Debug, PartialEq)]
+#[derive(Debug)]
 pub enum BufferPoolError {
     PageNotFound,
     IoError(std::io::Error),
@@ -15,7 +15,7 @@ impl From<std::io::Error> for BufferPoolError {
     }
 }
 
-struct BufferPool {
+pub struct BufferPool {
     page_paths: HashMap<u32, String>,
     pages: HashMap<u32, Page>,
 }
@@ -49,8 +49,8 @@ impl BufferPool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::fs;
     use tempfile::NamedTempFile;
+    use std::io::Write;
 
     #[test]
     fn test_read_page_from_disk() {
